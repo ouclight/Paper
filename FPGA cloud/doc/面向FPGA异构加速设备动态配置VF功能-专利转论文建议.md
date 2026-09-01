@@ -1,15 +1,16 @@
-# 面向 FPGA 异构加速设备动态配置 VF 功能——专利转论文建议
+# 面向 FPGA 云的统一接口、动态重构与多 AFU 聚合——专利转论文建议
 
-本文档综合参考以下两份技术交底书：
+本文档综合参考以下三份技术交底书：
 
 1. 《面向 FPGA 异构加速设备动态配置虚拟设备 VF 功能的方法》；
-2. 《一种功能可组合的 FPGA 异构加速器架构》。
+2. 《一种功能可组合的 FPGA 异构加速器架构》；
+3. 《基于 Virtio 面向异构加速设备的统一虚拟化接口设计》。
 
-两份技术交底书具备联合转化为论文的基础，但目前更像“可实施的工程方案”，还缺少论文所要求的研究问题、组合执行语义、形式化设计、对比实验和量化结论。
+三份技术交底书具备联合转化为论文的基础，但目前更像“可实施的工程方案”，还缺少论文所要求的研究问题、组合执行语义、形式化设计、对比实验和量化结论。
 
-综合第二份专利后，建议把论文主线凝练为：
+综合三份专利后，建议把论文主线凝练为：
 
-> 在保持 PCIe SR-IOV 接口稳定、不中断宿主机及其他虚拟机业务的条件下，将 VF 抽象为租户级虚拟加速器容器，通过统一接口、动态部分重配置、多 AFU 绑定以及租户级 DDR/BAR/MSI-X 资源虚拟化，实现 FPGA 加速功能的在线装载、按需组合和零拷贝协同。
+> 将 SR-IOV VF 抽象为具有稳定 Virtio ABI 的租户级虚拟加速器容器，通过动态部分重配置、多 AFU 绑定以及租户级寄存器、中断和设备内存虚拟化，实现 FPGA 加速功能的跨设备统一访问、在线装载、按需聚合和零拷贝协同。
 
 ## 一、论文最适合强调的创新点
 
@@ -513,4 +514,375 @@ length <= ddr_length - (address - ddr_start)
 
 > *A Dynamically Reconfigurable and Composable SR-IOV Accelerator Architecture for FPGA Clouds*
 
-从当前两份技术交底书的完成度看，建议先采用“多 AFU 聚合”作为稳妥定位；如果能够补充任务链、同步协议和组合运行时，再升级为“功能可组合”定位。
+仅从前两份技术交底书的完成度看，建议先采用“多 AFU 聚合”作为稳妥定位；如果能够补充任务链、同步协议和组合运行时，再升级为“功能可组合”定位。第三份专利加入后的整体选题取舍见第十九至二十一节。
+
+## 十四、第三份专利在整体架构中的位置
+
+第三份专利补充的是前两份专利尚未充分覆盖的“北向软件接口层”。三份专利可以组成以下完整技术栈：
+
+```text
+虚拟机应用与统一用户态 API
+              │
+通用 Virtio 加速器前端驱动
+              │
+Virtio PCI 传输、特性协商和 virtqueue
+              │
+SR-IOV VF：租户级虚拟加速器容器
+              │
+BAR / MSI-X / DDR 三类虚拟资源命名空间
+              │
+VF-AFU 事务化绑定与双向路由
+              │
+一个或多个动态 AFU + 共享租户 DDR
+              │
+FPGA 部分重配置区域
+
+PF 管理平面：发现、选择、装载、绑定、提交、回滚
+```
+
+三份专利分别回答：
+
+| 专利 | 主要问题 | 在统一论文中的角色 |
+|---|---|---|
+| 动态配置 VF 功能 | VF 如何与变化的 FPGA 算法解耦 | 在线重配置与动态绑定 |
+| 功能可组合架构 | 一个 VF 如何包含多个 AFU | 多 AFU 聚合和租户级资源共享 |
+| Virtio 统一接口 | 应用如何摆脱具体设备接口 | 稳定 ABI、统一驱动和跨后端兼容 |
+
+第三份专利使论文有机会形成“接口—虚拟化—重配置”三层联合设计，而不再只是 FPGA 内部的硬件路由机制。
+
+## 十五、必须明确 Virtio 与 SR-IOV 的关系
+
+Virtio 和 SR-IOV 解决的问题不同：
+
+- Virtio 定义虚拟设备的标准化软件接口和队列语义；
+- SR-IOV 让一个 PCIe 设备提供多个可直接分配的硬件 VF；
+- 前者不是后者的自然上层，也不能在论文中不加说明地混为一种机制。
+
+存在三种实现路线。
+
+### 路线 A：软件中介 Virtio
+
+```text
+Guest Virtio driver → QEMU/vhost backend → host PF/VF driver → FPGA
+```
+
+优点是实现容易、适配传统 Virtio 软件栈；缺点是数据路径存在主机软件中介，无法充分体现 SR-IOV 直通价值。
+
+### 路线 B：原生 SR-IOV 厂商接口
+
+```text
+Guest vendor driver → passthrough VF → FPGA
+```
+
+优点是性能高；缺点是应用和驱动仍与具体设备接口绑定，无法体现第三份专利的统一接口价值。
+
+### 路线 C：硬件实现 Virtio 的 SR-IOV VF
+
+```text
+Guest Virtio accelerator driver → passthrough VF
+                              → hardware Virtio queues → AFUs
+```
+
+这是最能统一三份专利的路线。每个 VF 同时是：
+
+- 一个可被虚拟机直通访问的 SR-IOV VF；
+- 一个符合 Virtio PCI 传输模型的虚拟加速器设备；
+- 一个可动态绑定多个 AFU 的租户级硬件容器。
+
+论文应明确采用哪条路线。如果能够在 FPGA 静态区实现 Virtio PCI common configuration、通知结构、设备配置空间及 virtqueue 数据路径，建议采用路线 C；否则应把 Virtio 接口论文与 SR-IOV 硬件论文拆开，避免架构主线失焦。
+
+## 十六、“复用 Virtio 驱动”需要准确表述
+
+第三份专利中“可复用现有 Virtio 驱动框架，避免额外开发”的表述需要收敛。Virtio 提供的是：
+
+- 设备发现和状态机；
+- 特性协商；
+- virtqueue 描述符和通知机制；
+- PCI/MMIO 等传输层；
+- 配置变化与复位框架。
+
+但如果定义一种新的异构加速器设备类型，仍然需要开发：
+
+- 设备类型专用的前端驱动；
+- FPGA 或软件后端；
+- AFU 发现、内存管理、命令提交和事件处理逻辑；
+- 用户态 API 或运行时库。
+
+因此论文宜表述为：
+
+> 复用 Virtio 的传输、队列、通知和特性协商框架，只需维护一个设备类型专用驱动，即可支持具有不同 AFU 实现的后端。
+
+而不宜声称“无需开发驱动”。截至目前的 Virtio 标准已经定义多种设备类型和通用机制，但没有可直接等同于本专利设计的通用 FPGA/异构 AFU 设备类型。因此，如果使用私有 device ID 或 vendor-specific 机制，论文应称为“Virtio-compatible prototype”，不能直接称为已标准化接口。
+
+参考：
+
+- [OASIS Virtual I/O Device (VIRTIO) Version 1.3](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
+- [OASIS Virtual I/O Device (VIRTIO) Version 1.4](https://docs.oasis-open.org/virtio/virtio/v1.4/)
+
+## 十七、第三份专利中的接口设计需要深化
+
+### 1. 不宜把可变长 AFU 清单全部放入设备配置空间
+
+Virtio 设备配置空间更适合较少变化、主要在初始化阶段读取的参数。AFU 列表可能较长，并且会随部分重配置和动态绑定改变。如果把整个列表直接放入配置空间，会产生：
+
+- 配置空间容量和 AFU 数量上限问题；
+- 多字段读取期间发生配置变化的一致性问题；
+- 增加新字段时的 ABI 兼容问题；
+- 动态添加 AFU 后 virtqueue 数量无法同步变化的问题。
+
+建议使用两级发现接口：
+
+```text
+Device-specific configuration：
+    ABI version
+    feature bits
+    max_afu
+    active_afu
+    config_generation
+    control queue index
+
+controlq：
+    QUERY_AFU_LIST
+    QUERY_AFU_CAPABILITY
+    CREATE_CONTEXT
+    DESTROY_CONTEXT
+    RESET_AFU
+```
+
+详细 AFU 描述通过控制队列或共享能力页获取。读取前后检查 `config_generation`，确保没有读到跨版本数据。Virtio 规范本身已经提供配置 generation 和配置变化通知，可直接利用，而无需另造一套不兼容机制。
+
+### 2. 动态 AFU 不宜对应动态数量的 virtqueue
+
+专利为每个 AFU 定义一对 `requestq + eventq`。如果 VF 动态绑定的 AFU 数量改变，virtqueue 数量和索引也随之变化，但 Virtio 队列通常在设备初始化阶段发现并配置，不能假设运行期间可任意增加或删除。
+
+建议从两种方案中选择：
+
+**固定队列池：**
+
+- VF 预先暴露固定上限的队列对；
+- AFU 绑定后从池中分配队列；
+- 适合追求 AFU 间性能隔离，但空闲队列会消耗资源。
+
+**共享队列：**
+
+- 一个或多个共享 `commandq`；
+- 一个共享 `eventq`；
+- 每条命令和事件携带由静态区分配的 `afu_handle/context_id`；
+- 可通过多队列或 queue group 扩展并发。
+
+对于 FPGA 静态区资源有限的场景，推荐共享队列方案。它还能减少 virtqueue 和 MSI-X 向量消耗。
+
+### 3. 需要定义真正统一的命令语义
+
+第三份专利仍通过 `bar + offset` 暴露 AFU 私有寄存器。这样虽然统一了“发现形式”，应用仍必须理解每个 AFU 的私有寄存器布局，并未完全解除应用与设备的绑定。
+
+可以将接口分成两层：
+
+- **稳定公共 ABI：** 枚举、内存分配、数据传输、命令提交、等待事件、取消和复位；
+- **AFU 专用 ABI：** 算法参数和操作码，由 `afu_id + abi_version` 标识。
+
+公共命令头建议至少包含：
+
+```text
+opcode
+flags
+afu_handle
+context_id
+request_id
+input_count
+output_count
+timeout
+```
+
+数据缓冲区建议采用句柄或 scatter-gather 描述，而不是让应用直接依赖设备物理 DDR 地址。BAR 直接访问可以保留为可选的低延迟 fast path，但不应成为统一接口唯一的控制方式。
+
+### 4. DMA 请求格式要与 Virtio 描述符语义分清
+
+Virtqueue 描述符本身描述的是 guest memory 中的输入和输出缓冲区；专利请求头中的 `ddr_address` 则表示设备侧 DDR 地址。论文需要明确一次请求究竟执行：
+
+- Host-to-Device；
+- Device-to-Host；
+- Device-to-Device；
+- 内存注册或释放；
+- AFU 命令提交。
+
+建议定义明确的操作码，并为设备 DDR 缓冲区使用 PF/VF 管理器分配的 `buffer_handle`。后端根据 handle 查询租户地址范围，避免虚拟机直接构造任意设备地址。
+
+### 5. eventq 必须预先提供可写缓冲区
+
+“AFU 将事件经 eventq 发送给主机”在实现上意味着：
+
+- 驱动预先向 eventq 放入一批可写描述符；
+- 设备选择一个可用描述符写入事件；
+- 设备更新 used ring 并按需通知驱动；
+- 驱动消费事件后补充新的接收缓冲区。
+
+需要定义事件格式，例如：
+
+```text
+event_type
+afu_handle
+context_id
+request_id
+status
+device_timestamp
+payload_length
+```
+
+DMA 完成通常可以通过 request/command queue 的 used buffer 表示；eventq 更适合承载异步 AFU 事件、故障、温度告警或配置变化，避免一个请求产生两套相互竞争的完成通知。
+
+### 6. 需要利用 Virtio 特性协商和复位语义
+
+建议定义 feature bits，用于协商：
+
+- 多 AFU；
+- 动态 AFU 热更新；
+- 共享 DDR；
+- eventq；
+- 零拷贝设备内存；
+- 每 AFU 复位；
+- 有序执行或乱序完成；
+- 安全 buffer handle；
+- 状态保存与恢复。
+
+Virtio 的设备级 reset 会停止整个设备的队列。如果一个 VF 内有多个 AFU，不能用整设备 reset 代替单 AFU 故障恢复，否则会影响同一租户内其他 AFU。因此还需要通过 controlq 定义 `RESET_AFU/RESET_CONTEXT`，并规定如何取消在途请求。
+
+## 十八、三份专利整合后的控制面和数据面
+
+建议在论文中明确区分两条路径。
+
+### PF 控制面
+
+负责：
+
+- 读取和认证部分比特流；
+- 发现 AFU 能力及接口版本；
+- 分配 VF、AFU、BAR、MSI-X 和 DDR 资源；
+- 构造影子配置表；
+- 原子提交或失败回滚；
+- 向 VF 触发 Virtio 配置变化通知；
+- 解绑、排空和资源回收。
+
+### VF 数据面
+
+负责：
+
+- Virtio feature negotiation 和队列建立；
+- AFU 枚举与能力查询；
+- 命令和 DMA 请求提交；
+- MMIO fast path；
+- virtqueue 完成通知和异步 eventq；
+- 设备 DDR 地址检查；
+- AFU 到 VF 的中断和事件路由。
+
+这种划分能解释为什么管理操作由可信 PF 完成，而虚拟机可以通过 VF 直接访问数据面。
+
+## 十九、三份专利是否应写成一篇论文
+
+### 合并为一篇论文的条件
+
+只有在具备以下原型时，才建议把三份专利写成一篇完整系统论文：
+
+- FPGA VF 原生实现 Virtio PCI 接口或具有清晰的软件后端；
+- 至少两个可动态加载或动态绑定的 AFU；
+- 同一个 VF 能发现并访问多个 AFU；
+- AFU 能共享租户级设备 DDR；
+- 配置更新具有一致性和失败恢复机制；
+- 同一个 guest 驱动和应用能够在至少两个不同 AFU 后端上不修改运行。
+
+合并后的论文故事是：
+
+> 一个具有统一 Virtio ABI、硬件直通性能和运行时 AFU 可重构能力的 FPGA 云虚拟加速器。
+
+### 拆成两篇论文的建议
+
+如果原型尚不能覆盖上述全链路，拆分通常更稳妥：
+
+**论文 A：硬件架构与资源管理**
+
+- SR-IOV VF 与 AFU 解耦；
+- 多 AFU 聚合；
+- BAR/MSI-X/DDR 虚拟化；
+- 部分重配置和事务化绑定；
+- 多租户隔离与零拷贝协同。
+
+**论文 B：统一软件接口**
+
+- Virtio-compatible accelerator device；
+- AFU 能力发现；
+- commandq/eventq 协议；
+- 公共 ABI 与 AFU 专用 ABI；
+- 跨后端可移植性和驱动复用。
+
+从技术范围和审稿风险看，如果当前只有专利方案而缺少覆盖三层的完整实现，优先撰写论文 A；第三份专利可作为论文 A 的软件接口设计，但不要把“跨设备统一接口”列为未经实验验证的主要贡献。
+
+## 二十、第三份专利加入后的新增实验
+
+### RQ9：统一接口的性能代价
+
+比较：
+
+1. 原生厂商 MMIO/DMA 接口；
+2. 软件中介 Virtio；
+3. 硬件 Virtio over SR-IOV VF。
+
+测量：
+
+- 单次命令提交延迟；
+- 4 KB 至大块 DMA 的吞吐率和延迟；
+- virtqueue 通知与 MSI-X 中断延迟；
+- 每秒命令数；
+- guest 和 host CPU 占用率；
+- FPGA 队列处理逻辑资源开销。
+
+### RQ10：应用是否真正可移植
+
+让相同的 guest 镜像、前端驱动和测试应用运行在：
+
+- 不同 FPGA 型号；
+- 同一功能的不同 AFU 实现；
+- FPGA 后端与软件模拟后端；
+- 如果条件允许，再加入 ASIC 或另一类加速卡。
+
+记录：
+
+- 无需修改的代码比例；
+- 后端适配代码量；
+- 驱动和应用是否需要重新编译；
+- 能力差异如何通过 feature bits 处理；
+- 性能是否仍接近原生接口。
+
+仅证明“接口格式相同”不够；同一二进制或同一源代码不修改运行，才是跨设备统一性的直接证据。
+
+### RQ11：动态更新时 Virtio 状态是否一致
+
+在 guest 持续提交队列请求时动态改变 AFU 组合，验证：
+
+- `config_generation` 正确变化；
+- guest 收到配置变化通知；
+- 旧 AFU handle 被拒绝；
+- 在途请求得到完成、取消或明确错误；
+- 队列不会访问已回收内存；
+- 未变化 AFU 的请求不受影响。
+
+## 二十一、综合三份专利后的题目建议
+
+如果重点是硬件架构：
+
+> 面向 FPGA 云的动态多 AFU 聚合与 SR-IOV 虚拟加速器架构
+
+> *A Dynamically Reconfigurable Multi-AFU SR-IOV Accelerator Architecture for FPGA Clouds*
+
+如果完成了硬件 Virtio 数据路径与统一驱动：
+
+> 面向 FPGA 云的 Virtio 兼容可重构组合式虚拟加速器
+
+> *A Virtio-Compatible Reconfigurable and Composable Virtual Accelerator for FPGA Clouds*
+
+如果只实现软件 Virtio 后端：
+
+> 面向异构加速设备的 Virtio 统一接口与动态 AFU 管理机制
+
+> *A Unified Virtio Interface with Dynamic AFU Management for Heterogeneous Accelerators*
+
+现阶段最稳妥的主标题仍建议突出“动态多 AFU 聚合与 SR-IOV”，将 Virtio 作为统一软件接口和实现亮点。只有完成硬件 Virtio VF、跨后端兼容性和性能对比后，才建议将 Virtio 放入主标题并列为核心贡献。
